@@ -1,26 +1,34 @@
 /*
+-------------------------------------------------------
+Stepper Motor Control – STM32F429ZI
+-------------------------------------------------------
+Description:
+This program drives a unipolar stepper motor using
+an STM32F429ZI Discovery board. It supports:
 
-(full step) angular resolution: 360/48 = 7.5 degrees/step;
-(half step) angular resolution: 360/96 = 3.75 degrees/step;
+- Full-step and half-step driving modes
+- Adjustable speed (via external buttons)
+- Direction control (CW / CCW)
+- User profile switching (Sophia / Rushil)
+- LCD display updates for profile and step mode
 
-Calculation for the angular resolution of the motor:
-Angular resolution = 360 degrees / Number of steps per revolution
-                   = 360 degrees / 48 steps per revolution
-                   ≈ 7.5 degrees per step
+Each profile has its own timing configuration
+(seconds per revolution).
 
-Student 1:
-Name: Sophia Mokhtari
-Number: 400479269
-Time period between two steps for half-stepping: 0.375 seconds
-Time period between two steps for full-stepping: 0.75 seconds
-Seconds per revolution: 36 seconds (from 69 - 33, per lab rules)
+-------------------------------------------------------
+Motor Angular Resolution:
+- Full step: 360° / 48 steps = 7.5° per step
+- Half step: 360° / 96 steps = 3.75° per step
 
-Student 2:
-Name: Rushil
-Number: 400507143
-Time period between two steps for half-stepping: ~0.448 seconds
-Time period between two steps for full-stepping: ~0.896 seconds
-Seconds per revolution: 43 seconds (43 as is, per lab rules)
+Student Profiles:
+- Sophia Mokhtari (400479269): 36s per revolution
+  Full-step period = 750 ms
+  Half-step period = 375 ms
+
+- Rushil (400507143): 43s per revolution
+  Full-step period ≈ 896 ms
+  Half-step period ≈ 448 ms
+-------------------------------------------------------
 */
 
 #include "mbed.h"
@@ -30,198 +38,217 @@ Seconds per revolution: 43 seconds (43 as is, per lab rules)
 #include "DebouncedInterrupt.h"
 #include "LCD_DISCO_F429ZI.h"
 
-// Initialize LCD object for displaying student info and step mode
+//-------------------------------------------------------
+// LCD Setup
+//-------------------------------------------------------
 LCD_DISCO_F429ZI LCD;
 
-// Digital outputs for stepper motor coils (connected to red, gray, yellow, black wires)
+//-------------------------------------------------------
+// Stepper Motor Coil Outputs
+// Connected to Red, Gray, Yellow, Black wires
+//-------------------------------------------------------
 DigitalOut red(PC_15);
 DigitalOut gray(PC_13);
 DigitalOut yellow(PE_5);
 DigitalOut black(PE_3);
 
-// Input buttons with interrupts for user interaction
-InterruptIn user_button(PA_0);         // Toggles between Sophia and Rushil's settings
-DebouncedInterrupt ext_btn_dir(PD_4);  // Changes motor direction (CW/CCW)
-DebouncedInterrupt ext_btn_step(PD_2); // Switches between full and half-step modes
-DebouncedInterrupt inc_speed(PE_6);    // Increases motor speed (decreases step period)
-DebouncedInterrupt dec_speed(PC_14);   // Decreases motor speed (increases step period)
+//-------------------------------------------------------
+// Input Buttons with Interrupts
+//-------------------------------------------------------
+InterruptIn user_button(PA_0);         // Switch between Sophia and Rushil profiles
+DebouncedInterrupt ext_btn_dir(PD_4);  // Toggle motor direction (CW/CCW)
+DebouncedInterrupt ext_btn_step(PD_2); // Toggle between full and half-step modes
+DebouncedInterrupt inc_speed(PE_6);    // Increase motor speed
+DebouncedInterrupt dec_speed(PC_14);   // Decrease motor speed
 
-// Ticker objects for periodic tasks
-Ticker motor;          // Controls motor stepping timing
-Ticker periodicTicker; // Not used in this code, but included in original
-EventQueue queue;      // Manages asynchronous LCD updates
-Thread thread;         // Runs the event queue in a separate thread
+//-------------------------------------------------------
+// Timing and Event Management
+//-------------------------------------------------------
+Ticker motor;          // Periodic ticker for motor stepping
+EventQueue queue;      // Event queue for LCD updates
+Thread thread;         // Thread to dispatch LCD events
 
-DigitalOut led3(PG_13); // LED indicator (toggles when switching profiles)
+//-------------------------------------------------------
+// Onboard Indicator LED
+//-------------------------------------------------------
+DigitalOut led3(PG_13); // Toggles when switching user profiles
 
-// Global variables
-int i = 0;          // Current step index in the step pattern (0 to 3 for full, 0 to 7 for half)
-int btn_user = 0;   // Profile selector (0 = Sophia, 1 = Rushil)
-int btn_dir = 1;    // Direction flag (1 = CW, 0 = CCW)
-int btn_step = 0;   // Step mode (0 = full step, 1 = half step)
-int step = 4;       // Number of steps in current pattern (4 for full, 8 for half)
+//-------------------------------------------------------
+// Global State Variables
+//-------------------------------------------------------
+int i = 0;          // Current step index (0–3 for full, 0–7 for half)
+int btn_user = 0;   // Active user profile (0 = Sophia, 1 = Rushil)
+int btn_dir = 1;    // Motor direction (1 = CW, 0 = CCW)
+int btn_step = 0;   // Step mode (0 = full, 1 = half)
+int step = 4;       // Number of steps in current pattern
 
-int speed_factor = 0; // Speed adjustment in ms (added to base step period)
+int speed_factor = 0; // User speed adjustment (ms offset)
 
-int freq_1;  // Full-step period in ms (time between steps)
-int freq_2;  // Half-step period in ms (time between steps)
-int freq;    // Current step period in ms (freq_1 or freq_2 + speed_factor)
+int freq_1;  // Full-step base period (ms)
+int freq_2;  // Half-step base period (ms)
+int freq;    // Active step period (ms)
 
-// 2D vectors to store step patterns for motor coils
-vector<vector<int>> set_up_h; // Half-step pattern (8 steps)
-vector<vector<int>> set_up_f; // Full-step pattern (4 steps)
+//-------------------------------------------------------
+// Step Patterns for Stepper Motor
+//-------------------------------------------------------
+// Half-step (8-step sequence, 96 steps/rev)
+vector<vector<int>> set_up_h = {
+    {1, 0, 1, 0}, // Red+Yellow
+    {1, 0, 0, 0}, // Red only
+    {1, 0, 0, 1}, // Red+Black
+    {0, 0, 0, 1}, // Black only
+    {0, 1, 0, 1}, // Gray+Black
+    {0, 1, 0, 0}, // Gray only
+    {0, 1, 1, 0}, // Gray+Yellow
+    {0, 0, 1, 0}  // Yellow only
+};
 
-// Updates step index based on direction (CW or CCW)
+// Full-step (4-step sequence, 48 steps/rev)
+vector<vector<int>> set_up_f = {
+    {1, 0, 1, 0}, // Red+Yellow
+    {1, 0, 0, 1}, // Red+Black
+    {0, 1, 0, 1}, // Gray+Black
+    {0, 1, 1, 0}  // Gray+Yellow
+};
+
+//-------------------------------------------------------
+// Helper Functions
+//-------------------------------------------------------
+
+// Step index updater based on direction
 void indexing() {
-    if (btn_dir == 0) { // Counterclockwise
-        i = i + 1;
-    } else {            // Clockwise
-        i = i - 1;
+    if (btn_dir == 0) {  // CCW
+        i = (i + 1) % step;
+    } else {             // CW
+        i = (i - 1 + step) % step;
     }
-    // Keep i within bounds (0 to step-1), handling negative values
-    i = i % step + (i < 0) * step;
 }
 
-// Applies full-step pattern to motor coils and advances index
+// Perform a full-step and advance index
 void rot_step_f() {
-    red   = set_up_f[i][0];
-    gray  = set_up_f[i][1];
-    yellow= set_up_f[i][2];
-    black = set_up_f[i][3];
+    red    = set_up_f[i][0];
+    gray   = set_up_f[i][1];
+    yellow = set_up_f[i][2];
+    black  = set_up_f[i][3];
     indexing();
 }
 
-// Applies half-step pattern to motor coils and advances index
+// Perform a half-step and advance index
 void rot_step_h() {
-    red   = set_up_h[i][0];
-    gray  = set_up_h[i][1];
-    yellow= set_up_h[i][2];
-    black = set_up_h[i][3];
+    red    = set_up_h[i][0];
+    gray   = set_up_h[i][1];
+    yellow = set_up_h[i][2];
+    black  = set_up_h[i][3];
     indexing();
 }
 
-// Toggles motor direction (CW <-> CCW)
+//-------------------------------------------------------
+// Interrupt Handlers
+//-------------------------------------------------------
+
+// Toggle direction (CW ↔ CCW)
 void switch_dir() {
     btn_dir = !btn_dir;
 }
 
-// Switches between full and half-step modes, updates motor timing
+// Toggle between full-step and half-step
 void switch_step() {
-    char stepping[20]; // Buffer for LCD display text
-    if (btn_step == 0) { // Switch to full step
-        freq = freq_1 + speed_factor; // Set period for full step
-        step = 4;                     // 4 steps per cycle
-        motor.attach(&rot_step_f, (std::chrono::milliseconds)freq); // Start ticker
+    char stepping[20];
+
+    if (btn_step == 0) { // Full step
+        freq = freq_1 + speed_factor;
+        step = 4;
+        motor.attach(&rot_step_f, std::chrono::milliseconds(freq));
         sprintf(stepping, "Full step");
-    } else { // Switch to half step
-        freq = freq_2 + speed_factor; // Set period for half step
-        step = 8;                     // 8 steps per cycle
-        motor.attach(&rot_step_h, (std::chrono::milliseconds)freq); // Start ticker
+    } else {             // Half step
+        freq = freq_2 + speed_factor;
+        step = 8;
+        motor.attach(&rot_step_h, std::chrono::milliseconds(freq));
         sprintf(stepping, "Half step");
     }
-    // Display current step mode on LCD
+
+    // Show mode on LCD
     LCD.DisplayStringAt(0, LINE(11), (uint8_t *)stepping, CENTER_MODE);
-    btn_step = !btn_step; // Toggle mode flag
+
+    btn_step = !btn_step; // Toggle mode
 }
 
-// Increases motor speed by reducing step period by 20ms
+// Increase speed (reduce period by 20 ms)
 void increase_speed() {
-    speed_factor += 20;   // Increase period (slower)
-    btn_step = !btn_step; // Force mode toggle to update timing
+    speed_factor -= 20;
+    btn_step = !btn_step; // Force reapply
     switch_step();
 }
 
-// Decreases motor speed by increasing step period by 20ms
+// Decrease speed (increase period by 20 ms)
 void decrease_speed() {
-    speed_factor -= 20;   // Decrease period (faster)
-    btn_step = !btn_step; // Force mode toggle to update timing
+    speed_factor += 20;
+    btn_step = !btn_step; // Force reapply
     switch_step();
 }
 
-// Displays Sophia's info on LCD
+//-------------------------------------------------------
+// LCD Display Functions
+//-------------------------------------------------------
 void LCD_refresh_sophia() {
-    LCD.SetFont(&Font16);         // Set font size
-    LCD.SetTextColor(LCD_COLOR_DARKBLUE); // Set text color
-    char name[] = "Sophia Mokhtari";
-    char number[] = "400479269";
-    char time[] = "36s per revolution";
-
-    // Display name, number, and time on LCD at specific lines
-    LCD.DisplayStringAt(0, LINE(5), (uint8_t *)name, CENTER_MODE);
-    LCD.DisplayStringAt(0, LINE(7), (uint8_t *)number, CENTER_MODE);
-    LCD.DisplayStringAt(0, LINE(9), (uint8_t *)time, CENTER_MODE);
+    LCD.SetFont(&Font16);
+    LCD.SetTextColor(LCD_COLOR_DARKBLUE);
+    LCD.DisplayStringAt(0, LINE(5), (uint8_t *)"Sophia Mokhtari", CENTER_MODE);
+    LCD.DisplayStringAt(0, LINE(7), (uint8_t *)"400479269", CENTER_MODE);
+    LCD.DisplayStringAt(0, LINE(9), (uint8_t *)"36s per revolution", CENTER_MODE);
 }
 
-// Displays Rushil's info on LCD
 void LCD_refresh_rushil() {
     LCD.SetFont(&Font16);
     LCD.SetTextColor(LCD_COLOR_DARKBLUE);
-    char name[] = "Rushil";
-    char number[] = "400507143";
-    char time[] = "43s per revolution";
-
-    LCD.DisplayStringAt(0, LINE(5), (uint8_t *)name, CENTER_MODE);
-    LCD.DisplayStringAt(0, LINE(7), (uint8_t *)number, CENTER_MODE);
-    LCD.DisplayStringAt(0, LINE(9), (uint8_t *)time, CENTER_MODE);
+    LCD.DisplayStringAt(0, LINE(5), (uint8_t *)"Rushil", CENTER_MODE);
+    LCD.DisplayStringAt(0, LINE(7), (uint8_t *)"400507143", CENTER_MODE);
+    LCD.DisplayStringAt(0, LINE(9), (uint8_t *)"43s per revolution", CENTER_MODE);
 }
 
-// Toggles between Sophia and Rushil's profiles and updates motor timing
+// Switch between profiles and update motor timing
 void switch_display() {
-    led3 = !led3; // Toggle LED to indicate profile switch
-    if (btn_user == 0) { // Switch to Sophia
-        freq_1 = 750;    // Full step: 36s / 48 = 750ms/step
-        freq_2 = 375;    // Half step: 36s / 96 = 375ms/step
-        queue.call(&LCD_refresh_sophia); // Update LCD asynchronously
-    } else { // Switch to Rushil
-        freq_1 = 896;    // Full step: 43s / 48 ≈ 896ms/step
-        freq_2 = 448;    // Half step: 43s / 96 ≈ 448ms/step
+    led3 = !led3; // Blink indicator LED
+
+    if (btn_user == 0) { // Sophia
+        freq_1 = 750;  // Full step period
+        freq_2 = 375;  // Half step period
+        queue.call(&LCD_refresh_sophia);
+    } else {           // Rushil
+        freq_1 = 896;  // Full step period
+        freq_2 = 448;  // Half step period
         queue.call(&LCD_refresh_rushil);
     }
-    switch_step(); // Apply new timing to motor
-    btn_user = !btn_user; // Toggle profile flag
+
+    switch_step();       // Apply timing
+    btn_user = !btn_user; // Toggle profile
 }
 
+//-------------------------------------------------------
+// Main Function
+//-------------------------------------------------------
 int main() {
-    led3 = 1; // Turn on LED initially
-
-    // Define full-step pattern (4 steps, repeated 12 times = 48 steps/rev)
-    set_up_f = {
-        {1, 0, 1, 0}, // Red+Yellow
-        {1, 0, 0, 1}, // Red+Black
-        {0, 1, 0, 1}, // Gray+Black
-        {0, 1, 1, 0}  // Gray+Yellow
-    };
-
-    // Define half-step pattern (8 steps, repeated 12 times = 96 steps/rev)
-    set_up_h = {
-        {1, 0, 1, 0}, // Full step
-        {1, 0, 0, 0}, // Red only
-        {1, 0, 0, 1}, // Full step
-        {0, 0, 0, 1}, // Black only
-        {0, 1, 0, 1}, // Full step
-        {0, 1, 0, 0}, // Gray only
-        {0, 1, 1, 0}, // Full step
-        {0, 0, 1, 0}  // Yellow only
-    };
+    led3 = 1; // LED ON at start
 
     // Initialize with Sophia's settings
-    freq_1 = 750;  // Full step period in ms
-    freq_2 = 375;  // Half step period in ms
-    freq = freq_1; // Start with full step
+    freq_1 = 750;
+    freq_2 = 375;
+    freq   = freq_1;
 
-    // Attach interrupt handlers to buttons
-    ext_btn_step.attach(&switch_step, IRQ_FALL, 20, false); // Step mode toggle
-    ext_btn_dir.attach(&switch_dir, IRQ_FALL, 20, false);   // Direction toggle
-    user_button.fall(&switch_display);                      // Profile switch
-    inc_speed.attach(&increase_speed, IRQ_FALL, 20, false); // Speed up
-    dec_speed.attach(&decrease_speed, IRQ_FALL, 20, false); // Speed down
+    // Attach interrupt handlers
+    ext_btn_step.attach(&switch_step, IRQ_FALL, 20, false);
+    ext_btn_dir.attach(&switch_dir, IRQ_FALL, 20, false);
+    user_button.fall(&switch_display);
+    inc_speed.attach(&increase_speed, IRQ_FALL, 20, false);
+    dec_speed.attach(&decrease_speed, IRQ_FALL, 20, false);
 
     __enable_irq(); // Enable interrupts globally
 
-    // Start thread to handle LCD updates via event queue
+    // Start event queue thread for LCD
     thread.start(callback(&queue, &EventQueue::dispatch_forever));
 
-    while(true) {
-        // Main loop is empty; motor control is handled by tickers and interrupts
+    // Main loop stays idle (work is interrupt-driven)
+    while (true) {
+        ThisThread::sleep_for(1s);
     }
 }
